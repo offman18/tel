@@ -4,9 +4,13 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # Allows manual trigger
+  workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *' # Run every 6 hours
+    - cron: '0 */6 * * *'
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   run-userbot:
@@ -33,5 +37,12 @@ jobs:
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
         run: |
-          # Run with a timeout of 5.5 hours (19800 seconds) to exit before GitHub's 6h limit
-          timeout 19800 python main.py || echo "Userbot session finished or timed out."
+          # Runs for up to 5 hours and 45 minutes then cleanly cycles
+          timeout 20700 python main.py || echo "Cycle completed."
+
+      - name: Keep Running 24/7 (Trigger Next Run)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run run_bot.yml --ref main || echo "Scheduled cron will pick up next run."
