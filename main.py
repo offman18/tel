@@ -3,7 +3,6 @@ import sys
 import re
 import asyncio
 from telethon import TelegramClient, events
-from telethon.tl.types import MessageEntityMentionName, MessageEntityMention
 from telethon.sessions import StringSession
 
 api_id_env = os.environ.get("TELEGRAM_API_ID")
@@ -28,10 +27,10 @@ async def init_bot():
     global me
     me = await client.get_me()
     print(f"==================================================")
-    print(f"Logged in successfully as {me.first_name} [ID: {me.id}, Username: @{me.username}]")
+    print(f"Userbot active as {me.first_name} [ID: {me.id}]")
     print(f"==================================================")
     try:
-        await client.send_message("me", "🚀 **יוזרבוט חיפוש הסרטים פעיל ומאזין כעת לבקשות!**")
+        await client.send_message("me", "🚀 **יוזרבוט חיפוש הסרטים פעיל במצב טקסט חופשי!**")
     except Exception:
         pass
 
@@ -41,7 +40,7 @@ async def handle_movie_request(event):
     if not me:
         return
 
-    # Check if target group restriction is configured
+    # Check if message is in the target group or in Saved Messages
     if target_group_secret:
         is_private_self = event.is_private and (event.chat_id == me.id)
         is_target_group = False
@@ -57,65 +56,23 @@ async def handle_movie_request(event):
         if not is_private_self and not is_target_group:
             return
 
-    text = (event.raw_text or "").strip()
-    if not text:
+    raw_text = (event.raw_text or "").strip()
+    if not raw_text:
         return
 
-    is_requested = False
-    query = ""
-
-    # 1. Check Telegram Entity Mentions (e.g. tagging Israel by user_id without username)
-    if event.entities:
-        for ent in event.entities:
-            if isinstance(ent, MessageEntityMentionName) and ent.user_id == me.id:
-                is_requested = True
-                break
-            elif isinstance(ent, MessageEntityMention) and me.username:
-                mention_text = text[ent.offset:ent.offset + ent.length].lstrip('@')
-                if mention_text.lower() == me.username.lower():
-                    is_requested = True
-                    break
-
-    # 2. Check if replying to Israel's message
-    if not is_requested and event.is_reply:
-        try:
-            reply_msg = await event.get_reply_message()
-            if reply_msg and reply_msg.sender_id == me.id:
-                is_requested = True
-        except Exception:
-            pass
-
-    # 3. Check text-based name triggers (e.g. "ישראל סרט...", "ישראל אשמתי", "היי ישראל...")
-    if not is_requested:
-        name_prefixes = ["ישראל ", "ישראל, ", "ישראל: ", "ישראל - ", "היי ישראל ", "לישראל "]
-        for np in name_prefixes:
-            if text.startswith(np):
-                is_requested = True
-                text = text[len(np):].strip()
-                break
-
-    # 4. Check command prefixes
-    command_prefixes = [
-        ".סרט ", "/סרט ", "סרט ", "סרט: ", "סרט - ",
-        ".חפש ", "/חפש ", "חפש ", "חפש: ", "חפש - ",
-        "תביא לי את הסרט ", "תביא לי סרט ", "תביא סרט ", "אפשר את הסרט ", "אפשר סרט ",
-        "הסרט ", ".movie ", "/movie ", "movie "
-    ]
-    for cp in command_prefixes:
-        if text.startswith(cp):
-            is_requested = True
-            text = text[len(cp):].strip()
-            break
-
-    if is_requested:
-        # Clean query: strip "סרט", "חפש", quotes, punctuation
-        cleaned = re.sub(r'^(?:סרט\s+|חפש\s+|הסרט\s+)', '', text, flags=re.IGNORECASE).strip()
-        query = cleaned if cleaned else text
-
-    if not is_requested or not query or len(query) < 2:
+    # Don't respond to status messages sent by the bot itself that start with 🔎, 🎬, ❌, ⚠️, 🚀
+    if event.sender_id == me.id and raw_text.startswith(("🔎", "🎬", "❌", "⚠️", "🚀")):
         return
 
-    # Send status reply
+    # Clean query from common prefixes if present, but accept pure movie name!
+    cleaned = re.sub(r'^(?:(?:היי\s+)?ישראל\s*[:,-]?\s*|(?:[./]?(?:סרט|חפש|movie))\s*[:,-]?\s*|(?:תביא\s+(?:לי\s+)?(?:את\s+)?(?:ה)?סרט\s*)|(?:אפשר\s+(?:את\s+)?(?:ה)?סרט\s*))', '', raw_text, flags=re.IGNORECASE).strip()
+    query = cleaned if cleaned else raw_text
+
+    # Skip if query is too short or is a link/URL
+    if len(query) < 2 or query.startswith("http://") or query.startswith("https://") or query.startswith("t.me/"):
+        return
+
+    # Send temporary status reply
     status_msg = None
     try:
         status_msg = await event.reply(f"🔎 מחפש את **'{query}'** בערוצים...")
@@ -125,8 +82,8 @@ async def handle_movie_request(event):
     found_media = None
 
     try:
-        # Tier 1: Fast Global Search
-        async for msg in client.iter_messages(None, search=query, limit=60):
+        # Tier 1: Global Search across all joined chats/channels
+        async for msg in client.iter_messages(None, search=query, limit=70):
             if msg.media and (msg.video or msg.document):
                 if msg.document:
                     mime = msg.document.mime_type or ""
@@ -138,7 +95,7 @@ async def handle_movie_request(event):
                     found_media = msg.media
                     break
 
-        # Tier 2: Channel-by-Channel Deep Search
+        # Tier 2: Deep Channel Search if not found in global search
         if not found_media:
             async for dialog in client.iter_dialogs(limit=50):
                 if dialog.is_channel or dialog.is_group:
@@ -154,7 +111,7 @@ async def handle_movie_request(event):
                     if found_media:
                         break
 
-        # Send file without 'Forwarded from'
+        # Send media directly without forward tag
         if found_media:
             caption = f"🎬 **הסרט:** `{query}`\n\n🍿 צפייה מהנה!"
             await client.send_file(
@@ -186,7 +143,7 @@ async def main():
         sys.exit(1)
 
     await init_bot()
-    print("Userbot is running and listening 24/7...")
+    print("Userbot is listening in free-text mode 24/7...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
