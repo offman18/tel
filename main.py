@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import asyncio
+import traceback
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
@@ -30,7 +31,7 @@ async def init_bot():
     print(f"Userbot active as {me.first_name} [ID: {me.id}]")
     print(f"==================================================")
     try:
-        await client.send_message("me", "🚀 **יוזרבוט חיפוש הסרטים פעיל במצב טקסט חופשי!**")
+        await client.send_message("me", "🚀 **יוזרבוט הסרטים פעיל ומוכן לקבל בקשות!**")
     except Exception:
         pass
 
@@ -40,7 +41,7 @@ async def handle_movie_request(event):
     if not me:
         return
 
-    # Check if message is in the target group or in Saved Messages
+    # Check if message is in target group or in Saved Messages
     if target_group_secret:
         is_private_self = event.is_private and (event.chat_id == me.id)
         is_target_group = False
@@ -60,7 +61,7 @@ async def handle_movie_request(event):
     if not raw_text:
         return
 
-    # Don't respond to status messages sent by the bot itself that start with 🔎, 🎬, ❌, ⚠️, 🚀
+    # Don't respond to status messages sent by the bot
     if event.sender_id == me.id and raw_text.startswith(("🔎", "🎬", "❌", "⚠️", "🚀")):
         return
 
@@ -72,14 +73,16 @@ async def handle_movie_request(event):
     if len(query) < 2 or query.startswith("http://") or query.startswith("https://") or query.startswith("t.me/"):
         return
 
-    # Send temporary status reply
+    print(f"[REQUEST] Searching movie for query: '{query}'")
+
+    # Send temporary status reply: "מכין לך את הסרט..."
     status_msg = None
     try:
-        status_msg = await event.reply(f"🔎 מחפש את **'{query}'** בערוצים...")
-    except Exception:
-        pass
+        status_msg = await event.reply("🔎 מכין לך את הסרט...")
+    except Exception as e:
+        print(f"Could not send reply status: {e}")
 
-    found_media = None
+    found_msg = None
 
     try:
         # Tier 1: Global Search across all joined chats/channels
@@ -89,14 +92,14 @@ async def handle_movie_request(event):
                     mime = msg.document.mime_type or ""
                     size_mb = (msg.document.size or 0) / (1024 * 1024)
                     if 'video' in mime or mime == 'application/octet-stream' or size_mb > 3:
-                        found_media = msg.media
+                        found_msg = msg
                         break
                 elif msg.video:
-                    found_media = msg.media
+                    found_msg = msg
                     break
 
         # Tier 2: Deep Channel Search if not found in global search
-        if not found_media:
+        if not found_msg:
             async for dialog in client.iter_dialogs(limit=50):
                 if dialog.is_channel or dialog.is_group:
                     if dialog.id == event.chat_id:
@@ -104,35 +107,56 @@ async def handle_movie_request(event):
                     try:
                         async for ch_msg in client.iter_messages(dialog.id, search=query, limit=15):
                             if ch_msg.media and (ch_msg.video or ch_msg.document):
-                                found_media = ch_msg.media
+                                found_msg = ch_msg
                                 break
                     except Exception:
                         continue
-                    if found_media:
+                    if found_msg:
                         break
 
         # Send media directly without forward tag
-        if found_media:
+        if found_msg:
             caption = f"🎬 **הסרט:** `{query}`\n\n🍿 צפייה מהנה!"
-            await client.send_file(
-                event.chat_id,
-                found_media,
-                caption=caption,
-                reply_to=event.id
-            )
-            if status_msg:
+            
+            # Try sending via media reference
+            sent = False
+            try:
+                await client.send_file(
+                    event.chat_id,
+                    found_msg.media,
+                    caption=caption,
+                    reply_to=event.id
+                )
+                sent = True
+            except Exception as send_err:
+                print(f"send_file failed with media: {send_err}, trying msg directly...")
+                try:
+                    await client.send_file(
+                        event.chat_id,
+                        found_msg,
+                        caption=caption,
+                        reply_to=event.id
+                    )
+                    sent = True
+                except Exception as send_err2:
+                    print(f"send_file with msg failed: {send_err2}")
+
+            if sent and status_msg:
                 try:
                     await status_msg.delete()
                 except Exception:
                     pass
+            elif not sent and status_msg:
+                await status_msg.edit(f"⚠️ לא ניתן להעביר את הסרט (ייתכן שהערוץ חסום להעברה).")
         else:
             if status_msg:
                 await status_msg.edit(f"❌ לא נמצא סרט התואם לחיפוש: **'{query}'**.")
 
-    except Exception:
+    except Exception as e:
+        traceback.print_exc()
         if status_msg:
             try:
-                await status_msg.edit("⚠️ אירעה שגיאה זמנית במהלך החיפוש.")
+                await status_msg.edit(f"❌ לא נמצא סרט התואם לחיפוש: **'{query}'**.")
             except Exception:
                 pass
 
