@@ -3,6 +3,7 @@ import sys
 import re
 import asyncio
 from telethon import TelegramClient, events
+from telethon.tl.types import MessageEntityMentionName, MessageEntityMention
 from telethon.sessions import StringSession
 
 api_id_env = os.environ.get("TELEGRAM_API_ID")
@@ -26,13 +27,14 @@ me = None
 async def init_bot():
     global me
     me = await client.get_me()
-    print(f"Logged in successfully as {me.first_name} [ID: {me.id}]")
+    print(f"==================================================")
+    print(f"Logged in successfully as {me.first_name} [ID: {me.id}, Username: @{me.username}]")
+    print(f"==================================================")
     try:
         await client.send_message("me", "🚀 **יוזרבוט חיפוש הסרטים פעיל ומאזין כעת לבקשות!**")
     except Exception:
         pass
 
-# Listen to ALL messages (both incoming from others and outgoing from self)
 @client.on(events.NewMessage())
 async def handle_movie_request(event):
     global me
@@ -41,10 +43,7 @@ async def handle_movie_request(event):
 
     # Check if target group restriction is configured
     if target_group_secret:
-        # Allow Saved Messages / Private chat with self for testing
         is_private_self = event.is_private and (event.chat_id == me.id)
-        
-        # Check group title if in a chat
         is_target_group = False
         try:
             if event.is_group or event.is_channel:
@@ -65,29 +64,55 @@ async def handle_movie_request(event):
     is_requested = False
     query = ""
 
-    # 1. Match mention: @username סרט <שם> or @username <שם>
-    if me.username:
-        mention_match = re.match(rf"@{me.username}\s+(?:סרט\s+|חפש\s+)?(.+)", text, re.IGNORECASE)
-        if mention_match:
-            query = mention_match.group(1).strip()
-            is_requested = True
-
-    # 2. Match command prefixes
-    if not is_requested:
-        prefixes = [
-            ".סרט ", "/סרט ", "סרט ", "סרט: ",
-            ".חפש ", "/חפש ", "חפש ", "חפש: ",
-            ".movie ", "/movie ", "movie "
-        ]
-        for p in prefixes:
-            if text.startswith(p):
-                parts = text.split(" ", 1)
-                if len(parts) > 1 and parts[1].strip():
-                    query = parts[1].strip()
+    # 1. Check Telegram Entity Mentions (e.g. tagging Israel by user_id without username)
+    if event.entities:
+        for ent in event.entities:
+            if isinstance(ent, MessageEntityMentionName) and ent.user_id == me.id:
+                is_requested = True
+                break
+            elif isinstance(ent, MessageEntityMention) and me.username:
+                mention_text = text[ent.offset:ent.offset + ent.length].lstrip('@')
+                if mention_text.lower() == me.username.lower():
                     is_requested = True
+                    break
+
+    # 2. Check if replying to Israel's message
+    if not is_requested and event.is_reply:
+        try:
+            reply_msg = await event.get_reply_message()
+            if reply_msg and reply_msg.sender_id == me.id:
+                is_requested = True
+        except Exception:
+            pass
+
+    # 3. Check text-based name triggers (e.g. "ישראל סרט...", "ישראל אשמתי", "היי ישראל...")
+    if not is_requested:
+        name_prefixes = ["ישראל ", "ישראל, ", "ישראל: ", "ישראל - ", "היי ישראל ", "לישראל "]
+        for np in name_prefixes:
+            if text.startswith(np):
+                is_requested = True
+                text = text[len(np):].strip()
                 break
 
-    if not is_requested or not query:
+    # 4. Check command prefixes
+    command_prefixes = [
+        ".סרט ", "/סרט ", "סרט ", "סרט: ", "סרט - ",
+        ".חפש ", "/חפש ", "חפש ", "חפש: ", "חפש - ",
+        "תביא לי את הסרט ", "תביא לי סרט ", "תביא סרט ", "אפשר את הסרט ", "אפשר סרט ",
+        "הסרט ", ".movie ", "/movie ", "movie "
+    ]
+    for cp in command_prefixes:
+        if text.startswith(cp):
+            is_requested = True
+            text = text[len(cp):].strip()
+            break
+
+    if is_requested:
+        # Clean query: strip "סרט", "חפש", quotes, punctuation
+        cleaned = re.sub(r'^(?:סרט\s+|חפש\s+|הסרט\s+)', '', text, flags=re.IGNORECASE).strip()
+        query = cleaned if cleaned else text
+
+    if not is_requested or not query or len(query) < 2:
         return
 
     # Send status reply
@@ -101,7 +126,7 @@ async def handle_movie_request(event):
 
     try:
         # Tier 1: Fast Global Search
-        async for msg in client.iter_messages(None, search=query, limit=50):
+        async for msg in client.iter_messages(None, search=query, limit=60):
             if msg.media and (msg.video or msg.document):
                 if msg.document:
                     mime = msg.document.mime_type or ""
@@ -113,15 +138,14 @@ async def handle_movie_request(event):
                     found_media = msg.media
                     break
 
-        # Tier 2: Channel-by-Channel Deep Search if not found in Global Search
+        # Tier 2: Channel-by-Channel Deep Search
         if not found_media:
-            async for dialog in client.iter_dialogs(limit=40):
+            async for dialog in client.iter_dialogs(limit=50):
                 if dialog.is_channel or dialog.is_group:
-                    # Skip searching inside the group where the request came from
                     if dialog.id == event.chat_id:
                         continue
                     try:
-                        async for ch_msg in client.iter_messages(dialog.id, search=query, limit=10):
+                        async for ch_msg in client.iter_messages(dialog.id, search=query, limit=15):
                             if ch_msg.media and (ch_msg.video or ch_msg.document):
                                 found_media = ch_msg.media
                                 break
@@ -130,7 +154,7 @@ async def handle_movie_request(event):
                     if found_media:
                         break
 
-        # If found, send instantly without forward tag
+        # Send file without 'Forwarded from'
         if found_media:
             caption = f"🎬 **הסרט:** `{query}`\n\n🍿 צפייה מהנה!"
             await client.send_file(
@@ -148,7 +172,7 @@ async def handle_movie_request(event):
             if status_msg:
                 await status_msg.edit(f"❌ לא נמצא סרט התואם לחיפוש: **'{query}'**.")
 
-    except Exception as e:
+    except Exception:
         if status_msg:
             try:
                 await status_msg.edit("⚠️ אירעה שגיאה זמנית במהלך החיפוש.")
