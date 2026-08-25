@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: '0 */6 * * *'
 
+# STRICT SINGLETON: Never allow more than 1 instance to run simultaneously!
+concurrency:
+  group: telegram-userbot-singleton
+  cancel-in-progress: true
+
 permissions:
   actions: write
   contents: read
